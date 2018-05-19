@@ -24,7 +24,7 @@ def predict_transform(prediction, inp_dim, anchors, num_classes, CUDA=True):
     anchors = [(a[0]/stride, a[1]/stride) for a in anchors]
 
     # sigmoid the x, y coordinate and the object score
-    # the element in bbox is x, y, w, h, score
+    # the element in bbox is x, y, score
     prediction[:, :, 0] = torch.sigmoid(prediction[:, :, 0])
     prediction[:, :, 1] = torch.sigmoid(prediction[:, :, 1])
     prediction[:, :, 4] = torch.sigmoid(prediction[:, :, 4])
@@ -45,7 +45,6 @@ def predict_transform(prediction, inp_dim, anchors, num_classes, CUDA=True):
     prediction[:, :, :2] += x_y_offset
 
     # change for anchors width and height
-
     anchors = torch.FloatTensor(anchors)
     if CUDA:
         anchors = anchors.cuda()
@@ -54,7 +53,6 @@ def predict_transform(prediction, inp_dim, anchors, num_classes, CUDA=True):
     prediction[:, :, 2:4] = torch.exp(prediction[:, :, 2:4])*anchors
 
     # change for classification
-
     prediction[:, :, 5:5+num_classes] = torch.sigmoid(prediction[:, :, 5:5+num_classes])
 
     # resize to the original image size
@@ -176,7 +174,10 @@ def write_results(prediction, confidence, num_classes, nms = True, nms_conf=0.4)
                 out = torch.cat(seq, 1)
                 output = torch.cat((output, out))
 
-    return output
+    try:
+        return output
+    except:
+        return 0
 
 
 

@@ -1,5 +1,13 @@
 import argparse
 
+def str2bool(v):
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Unsupported value encountered.')
+
 def arg_parse():
     '''
     parse arguements to the yolo
@@ -7,9 +15,11 @@ def arg_parse():
     parser = argparse.ArgumentParser(description='yolo detection moduel')
     parser.add_argument('--dataset', dest='dataset', help=
                         'Image / Directory containing images for train test',
-                        default='images/dog.jpg', type=str)
+                        default='images/', type=str)
     parser.add_argument('--det', dest='det', help='Result to store detections',
                         default='det', type=str)
+    parser.add_argument('--json', dest='json', help='Save the detection result as josn file',
+                        nargs='?', default=True, type=str2bool)
     parser.add_argument('--batch_size', dest='batch_size', help='Batch size',
                         default=1)
     parser.add_argument('--conf_thresh', dest='conf_thresh',
