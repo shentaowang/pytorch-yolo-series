@@ -8,7 +8,8 @@ import cv2
 
 def predict_transform(prediction, inp_dim, anchors, num_classes, CUDA=True):
     batch_size = prediction.size(0)
-    # prediction is batch_size * W * H * (anchors*(5+c))
+    # predict_transform function takes an detection feature map and turns
+    # it into a 2-D tensor which is (batch_size) x (h * w * anchors) x (5+c))
     # suppose the image is square
     stride = inp_dim // prediction.size(2)
     grid_size = inp_dim // stride
@@ -100,7 +101,7 @@ def bbox_iou(box1, box2):
 
 def write_results(prediction, confidence, num_classes, nms = True, nms_conf=0.4):
     # only use the bbox a high level confidence
-    # outpt is bboxes * (batch_index, xmin, ymin, xmax, ymax, conf, clas)
+    # outpt is bboxes * (batch_index, xmin, ymin, xmax, ymax, conf, max_conf, clas)
     conf_mask = (prediction[:, :, 4] > confidence).float().unsqueeze(2)
     prediction = prediction * conf_mask
 

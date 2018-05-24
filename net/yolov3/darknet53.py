@@ -5,8 +5,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import cv2
+import math
 
-from .net_utils import predict_transform, write_results
+from .net_utils import predict_transform, write_results, bbox_iou
 
 
 class DetectionLayer(nn.Module):
@@ -20,11 +21,132 @@ class EmptyLayer(nn.Module):
         super(EmptyLayer, self).__init__()
 
 
+class RegionLoss(nn.Module):
+    def __init__(self, yolo_block, net_info):
+        super(RegionLoss, self).__init__()
+        self.num_classes = int(yolo_block['classes'])
+        self.num_anchors = int(yolo_block['num'])
+        self.ignore_thresh = float(yolo_block['ignore_thresh'])
+        self.width = int(net_info['width'])
+        self.height = int(net_info['height'])
+        self.batch = int(net_info['batch'])
+        self.coord_scale = 1
+        self.object_scale = 5
+        self.noobject_scale = 1
+        self.class_scale = 1
+
+
+    def forward(self, output, target):
+        '''
+        Preprocess true boxes to training input format
+        suppose target shape is
+        batch_size x num_anchors x (5)
+        which is (xmin, ymin, xmax, ymax, c)
+
+        suppose output shape is batch_size x num_anchors x (5+classes)
+        '''
+        loss = 0
+
+        map1 = output.size(1)//((1+4+16)*3)
+        batch_size = output.size(0)
+        # use for loc the grd_grid
+        stride = int(self.width//math.sqrt(map1))
+
+        assert map1 * (1+4+16) * 3 == output.size(1)
+
+        basi_anchors = map1 * 3
+        map_list = np.array([0, basi_anchors, basi_anchors*4, basi_anchors*16])
+        assert stride == 32
+        stride_list = [stride, stride//4, stride//16]
+        gride_num = int(math.sqrt(map1))
+        assert gride_num == 13
+        gride_list = [gride_num, gride_num*4, gride_num*16]
+
+
+        assert map_list.shape == (4, )
+        map_list = np.cumsum(map_list, axis=0)
+        for l in range(3):
+            map = output[:, map_list[l]:map_list[l+1], :]
+            # reshpe to batch_size x (h * w) x 3 x (5+classes)
+            map = map.view(batch_size, (2**l)*map1, 3, -1)
+            # calculate the conf_mask
+            conf_mask = torch.ones(map.size()[0:-1])*math.sqrt(self.noobject_scale)
+            cls_mask = torch.zeros(map.size()[0:-1])
+            coord_mask = torch.zeros(map.size()[0:-1])
+            tx = torch.zeros(map.size()[0:-1])
+            ty = torch.zeros(map.size()[0:-1])
+            tw = torch.zeros(map.size()[0:-1])
+            th = torch.zeros(map.size()[0:-1])
+            tconf = torch.zeros(map.size()[0:-1])
+            tcls = torch.zeros(*map.size()[0:-1], self.num_classes)
+            for b in range(batch_size):
+                for t in range(target.size(1)):
+                    loc_x = (target[b, t, 0] + target[b, t, 2])/2
+                    loc_y = (target[b, t, 1] + target[b, t, 3])/2
+                    index = (torch.floor(loc_y/stride_list[l]) * gride_list[l]\
+                            + torch.floor(loc_x/stride_list[l])).long()
+                    output_ = torch.zeros([3, 4])
+                    output_[:, 0] = map[b, index, :, 0] - map[b, index, :, 2]/2
+                    output_[:, 1] = map[b, index, :, 1] - map[b, index, :, 3]/2
+                    output_[:, 2] = map[b, index, :, 0] + map[b, index, :, 2]/2
+                    output_[:, 3] = map[b, index, :, 1] + map[b, index, :, 3]/2
+                    cur_target = torch.FloatTensor(target[b, t, :4]).repeat(3, 1)
+                    ious = bbox_iou(output_, cur_target)
+                    conf_mask[b, index][ious > self.ignore_thresh] = 0
+
+                    max_index = torch.argmax(ious)
+                    max_iou = torch.max(ious)
+                    conf_mask[b, index, max_index] = math.sqrt(self.object_scale)
+                    cls_mask[b, index, max_index] = 1
+                    coord_mask[b, index, max_index] = 1
+
+                    tconf[b, index, max_index] = max_iou
+                    tcls[b, index, max_index, int(target[b, t, 4])] = 1
+                    tx[b, index, max_index] = loc_x
+                    ty[b, index, max_index] = loc_y
+                    tw[b, index, max_index] = target[b, t, 2] - target[b, t, 0]
+                    th[b, index, max_index] = target[b, t, 3] - target[b, t, 1]
+            print(conf_mask)
+            print(map[:, :, :, 4])
+            print(tconf)
+            print(map[:, :, :, 4]*conf_mask)
+            print(tconf*conf_mask)
+            loss_conf = nn.MSELoss(size_average=False)(map[:, :, :, 4]*conf_mask, tconf*conf_mask)/2.0
+            cls_mask = (cls_mask == 1)
+            cls = map[:, :, :, 5:]
+            loss_cls = nn.MSELoss(size_average=False)(cls[cls_mask], tcls[cls_mask])/2.0
+            loss_cls = self.class_scale * loss_cls
+
+            # rescale coord to 0-1
+            map_x = map[:, :, :, 0]/self.width
+            map_y = map[:, :, :, 1]/self.width
+            map_w = map[:, :, :, 2]/self.width
+            map_h = map[:, :, :, 3]/self.width
+            tx, ty, tw, th = tx/self.width, ty/self.width, tw/self.width, th/self.width
+            loss_x = nn.MSELoss(size_average=False)((2-tw*th)*map_x*coord_mask,
+                                                    (2-tw*th)*tx*coord_mask)/2.0
+            loss_y = nn.MSELoss(size_average=False)((2-tw*th)*map_y*coord_mask,
+                                                    (2-tw*th)*ty*coord_mask)/2.0
+            loss_w = nn.MSELoss(size_average=False)((2-tw*th)*map_w*coord_mask,
+                                                    (2-tw*th)*tw*coord_mask)/2.0
+            loss_h = nn.MSELoss(size_average=False)((2-tw*th)*map_h*coord_mask,
+                                                    (2-tw*th)*th*coord_mask)/2.0
+            loss_coord = self.coord_scale*(loss_x + loss_y + loss_w + loss_h)
+            print(loss_coord)
+            print(loss_cls)
+            print(loss_conf)
+            loss = loss + loss_coord + loss_cls + loss_conf
+            return loss
+
+
+
+
 class Darknet53(nn.Module):
     def __init__(self, cfgfile):
         super(Darknet53, self).__init__()
         self.block_list = parse_cfg(cfgfile)
         self.net_info, self.module_list = create_modules(self.block_list)
+        self.loss = RegionLoss(self.block_list[-1], self.net_info)
 
     def forward(self, x, CUDA):
         modules = self.block_list[1:]
@@ -76,7 +198,6 @@ class Darknet53(nn.Module):
                     detections = torch.cat((detections, x), 1)
 
             outputs[i] = x
-
         return detections
 
     def load_weights(self, weightfile):
@@ -290,7 +411,7 @@ def create_modules(block_list):
 
             anchors = x["anchors"].split(",")
             anchors = [int(a) for a in anchors]
-            anchors = [(anchors[i], anchors[i+1]) for i in range(0, len(anchors),2)]
+            anchors = [(anchors[i], anchors[i+1]) for i in range(0, len(anchors), 2)]
             anchors = [anchors[i] for i in mask]
 
             detection = DetectionLayer(anchors)
@@ -304,7 +425,7 @@ def create_modules(block_list):
 
 
 def get_test_input():
-    img = cv2.imread('../../images/dog-cycle-car.png')
+    img = cv2.imread('../../images/dog.jpg')
     img = cv2.resize(img, (416, 416))
     # BGR -> RGB | H * W C -> C * H * W
     img = img[:, :, ::-1].transpose((2, 0, 1))
@@ -319,7 +440,9 @@ if __name__ == '__main__':
     model.load_weights('../../bin/yolov3.weights')
     inp = get_test_input()
     pred = model(inp, torch.cuda.is_available())
-    print(write_results(pred, confidence=0.5, num_classes=80))
+    detect = write_results(pred, confidence=0.5, num_classes=80)
+    detect = torch.cat((detect[:, 1:5], detect[:, 7].unsqueeze(1)), 1).unsqueeze(0)
+    print(model.loss(pred, detect))
 
 
 

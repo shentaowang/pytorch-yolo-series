@@ -1,7 +1,8 @@
 # yolo series
 Implement yolo methods, including yolov3
 
-Convert https://github.com/ayooshkathuria/pytorch-yolo-v3
+Convert from https://github.com/ayooshkathuria/pytorch-yolo-v3
+
 This repository is trying to achieve the following goals.
 
 - [x] load darknet cfg
